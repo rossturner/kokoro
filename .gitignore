@@ -171,6 +171,7 @@ cython_debug/
 .pypirc
 
 # Project-specific ignores
+.idea
 working/
 dubbing/
 test_kokoro.py
