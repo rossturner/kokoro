@@ -169,3 +169,13 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Project-specific ignores
+working/
+dubbing/
+test_kokoro.py
+condaenv.*.requirements.txt
+=0.9.4
+*.mp4
+*.wav
+*.srt
