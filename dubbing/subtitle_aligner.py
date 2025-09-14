@@ -136,44 +136,156 @@ class SubtitleAligner:
             return False
 
     def _transcribe_with_timestamps(self, audio_path: Path) -> List[WordTimestamp]:
-        """Transcribe audio and extract word-level timestamps."""
+        """Transcribe audio and extract word-level timestamps using subprocess."""
+        import subprocess
+        import sys
+        import tempfile
+        import os
+
         try:
-            print(f"Transcribing audio with Whisper: {audio_path}")
+            print(f"Transcribing audio with Whisper in subprocess: {audio_path}")
 
-            # Transcribe with word-level timestamps
-            segments, info = self.model.transcribe(
-                str(audio_path),
-                beam_size=5,
-                word_timestamps=True,
-                language="en"
-            )
+            # Create a temporary script that will run Whisper in isolation
+            whisper_script = '''
+import json
+import sys
+from pathlib import Path
+from faster_whisper import WhisperModel
 
-            print(f"Detected language: {info.language} (probability: {info.language_probability:.2f})")
+def transcribe_audio(audio_path, model_size, device, compute_type):
+    try:
+        model = WhisperModel(model_size, device=device, compute_type=compute_type)
 
-            word_timestamps = []
+        segments, info = model.transcribe(
+            audio_path,
+            beam_size=5,
+            word_timestamps=True,
+            language="en"
+        )
 
-            for segment in segments:
-                if hasattr(segment, 'words') and segment.words:
-                    for word in segment.words:
-                        word_timestamps.append(WordTimestamp(
-                            word=word.word.strip(),
-                            start=word.start,
-                            end=word.end,
-                            probability=getattr(word, 'probability', 1.0)
-                        ))
+        word_timestamps = []
+        for segment in segments:
+            if hasattr(segment, 'words') and segment.words:
+                for word in segment.words:
+                    word_timestamps.append({
+                        "word": word.word.strip(),
+                        "start": float(word.start),
+                        "end": float(word.end),
+                        "probability": float(getattr(word, 'probability', 1.0))
+                    })
 
-            print(f"Extracted {len(word_timestamps)} word timestamps")
+        result = {
+            "success": True,
+            "language": info.language,
+            "language_probability": float(info.language_probability),
+            "word_timestamps": word_timestamps
+        }
 
-            # Debug: Print first few words
-            if word_timestamps and self.config.verbose_logging:
-                print("Sample word timestamps:")
-                for i, wt in enumerate(word_timestamps[:10]):
-                    print(f"  {i+1}: '{wt.word}' ({wt.start:.3f}s - {wt.end:.3f}s)")
+        print(json.dumps(result))
 
-            return word_timestamps
+    except Exception as e:
+        result = {
+            "success": False,
+            "error": str(e)
+        }
+        print(json.dumps(result))
 
+if __name__ == "__main__":
+    audio_path = sys.argv[1]
+    model_size = sys.argv[2]
+    device = sys.argv[3]
+    compute_type = sys.argv[4]
+    transcribe_audio(audio_path, model_size, device, compute_type)
+'''
+
+            # Write the script to a temporary file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                f.write(whisper_script)
+                temp_script_path = f.name
+
+            try:
+                # Get conda environment python path
+                conda_python = "/home/ross/miniconda/envs/kokoro/bin/python"
+
+                # Prepare command arguments
+                model_size = getattr(self.config, 'whisper_model_size', 'large-v3')
+                device = getattr(self.config, 'whisper_device', 'cuda')
+                compute_type = getattr(self.config, 'whisper_compute_type', 'float16')
+
+                # Run the subprocess
+                cmd = [conda_python, temp_script_path, str(audio_path), model_size, device, compute_type]
+
+                print(f"Running Whisper command: {' '.join(cmd)}")
+
+                # Prepare environment with cuDNN library path
+                env = os.environ.copy()
+                cudnn_lib_path = "/home/ross/miniconda/envs/kokoro/lib/python3.11/site-packages/nvidia/cudnn/lib"
+                current_ld_path = env.get('LD_LIBRARY_PATH', '')
+                if current_ld_path:
+                    env['LD_LIBRARY_PATH'] = f"{cudnn_lib_path}:{current_ld_path}"
+                else:
+                    env['LD_LIBRARY_PATH'] = cudnn_lib_path
+
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=1800,  # 30 minute timeout
+                    env=env  # Pass the modified environment
+                )
+
+                if result.returncode != 0:
+                    print(f"Whisper subprocess failed with return code {result.returncode}")
+                    print(f"STDOUT: {result.stdout}")
+                    print(f"STDERR: {result.stderr}")
+                    return []
+
+                # Parse the JSON output
+                try:
+                    output_data = json.loads(result.stdout.strip())
+                except json.JSONDecodeError as e:
+                    print(f"Failed to parse Whisper output as JSON: {e}")
+                    print(f"Raw output: {result.stdout}")
+                    return []
+
+                if not output_data.get("success", False):
+                    print(f"Whisper transcription failed: {output_data.get('error', 'Unknown error')}")
+                    return []
+
+                print(f"Detected language: {output_data['language']} (probability: {output_data['language_probability']:.2f})")
+
+                # Convert to WordTimestamp objects
+                word_timestamps = []
+                for word_data in output_data["word_timestamps"]:
+                    word_timestamps.append(WordTimestamp(
+                        word=word_data["word"],
+                        start=word_data["start"],
+                        end=word_data["end"],
+                        probability=word_data["probability"]
+                    ))
+
+                print(f"Extracted {len(word_timestamps)} word timestamps")
+
+                # Debug: Print first few words
+                if word_timestamps and getattr(self.config, 'verbose_logging', False):
+                    print("Sample word timestamps:")
+                    for i, wt in enumerate(word_timestamps[:10]):
+                        print(f"  {i+1}: '{wt.word}' ({wt.start:.3f}s - {wt.end:.3f}s)")
+
+                return word_timestamps
+
+            finally:
+                # Clean up temporary script
+                try:
+                    os.unlink(temp_script_path)
+                except:
+                    pass
+
+        except subprocess.TimeoutExpired:
+            print("Whisper transcription timed out after 30 minutes")
+            return []
         except Exception as e:
-            print(f"Error transcribing audio: {e}")
+            print(f"Error running Whisper subprocess: {e}")
             return []
 
     def _align_subtitle_timings(
