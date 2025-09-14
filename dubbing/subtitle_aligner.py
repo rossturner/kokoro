@@ -67,19 +67,6 @@ class SubtitleAligner:
             alignment_processing_time=0.0
         )
 
-    def _initialize_whisper_model(self) -> bool:
-        """Initialize faster-whisper model with GPU acceleration via subprocess."""
-        # Don't initialize the model directly - we'll use subprocess calls instead
-        # to avoid library conflicts with Kokoro
-        print("Whisper model will be initialized in subprocess to avoid conflicts")
-        return True
-
-        except ImportError:
-            print("Error: faster-whisper not installed. Install with: pip install faster-whisper")
-            return False
-        except Exception as e:
-            print(f"Error initializing Whisper model: {e}")
-            return False
 
     def align_subtitles(
         self,
@@ -108,11 +95,7 @@ class SubtitleAligner:
         try:
             print("\n=== Phase: Subtitle Alignment ===")
 
-            # Initialize Whisper model
-            if not self._initialize_whisper_model():
-                return False
-
-            # Transcribe audio with word-level timestamps
+            # Transcribe audio with word-level timestamps using subprocess
             word_timestamps = self._transcribe_with_timestamps(audio_path)
             if not word_timestamps:
                 print("Failed to transcribe audio")
