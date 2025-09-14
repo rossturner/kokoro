@@ -21,6 +21,7 @@ from .tts_generator import TTSGenerator
 from .audio_assembler import AudioAssembler
 from .video_processor import VideoProcessor
 from .subtitle_extractor import SubtitleExtractor
+from .subtitle_aligner import SubtitleAligner
 
 
 class DubbingPipeline:
@@ -34,6 +35,7 @@ class DubbingPipeline:
         self.tts_generator = TTSGenerator(config)
         self.assembler = AudioAssembler(config)
         self.video_processor = VideoProcessor(config)
+        self.subtitle_aligner = SubtitleAligner(config)
 
         # Pipeline statistics
         self.pipeline_stats = {
@@ -108,6 +110,11 @@ class DubbingPipeline:
             # Phase 5: Assemble final audio
             if not self._assemble_audio(working_dir):
                 return False
+
+            # Phase 5.5: Align subtitle timings (if enabled)
+            if self.config.align_subtitles:
+                if not self._align_subtitle_timings(working_dir):
+                    print("Warning: Subtitle alignment failed, continuing with original timings")
 
             # Phase 6: Create final video
             if not self._create_final_video(working_dir, output_dir):
@@ -374,6 +381,44 @@ class DubbingPipeline:
             print(f"Audio assembly failed: {e}")
             return False
 
+    def _align_subtitle_timings(self, working_dir: Path) -> bool:
+        """Align subtitle timings with actual spoken words using Whisper."""
+        print("\n=== Phase 5.5: Align Subtitle Timings ===")
+
+        try:
+            # Get paths
+            final_audio_path = self.config.get_final_audio_path(working_dir)
+            aligned_srt_path = working_dir / "subtitles_aligned.srt"
+
+            # Get timeline events for debugging
+            timeline_events = getattr(self.assembler, 'timeline', None)
+
+            # Align subtitles with word-level timestamps
+            success = self.subtitle_aligner.align_subtitles(
+                self.subtitle_entries,
+                final_audio_path,
+                aligned_srt_path,
+                timeline_events=timeline_events,
+                sentence_groups=self.sentence_groups
+            )
+
+            if success:
+                print(f"Aligned subtitles saved: {aligned_srt_path}")
+                # Store aligned subtitle path for video creation
+                self.aligned_srt_path = aligned_srt_path
+                self.pipeline_stats['steps_completed'].append('align_subtitles')
+                return True
+            else:
+                print("Subtitle alignment failed")
+                return False
+
+        except Exception as e:
+            print(f"Subtitle alignment failed: {e}")
+            import traceback
+            if self.config.verbose_logging:
+                traceback.print_exc()
+            return False
+
     def _create_final_video(self, working_dir: Path, output_dir: Optional[str]) -> bool:
         """Create final dubbed video file."""
         print("\n=== Phase 6: Create Final Video ===")
@@ -381,17 +426,25 @@ class DubbingPipeline:
         try:
             video_path = self.working_video_path  # Use stored copied video file path
             audio_path = self.config.get_final_audio_path(working_dir)
-            srt_path = working_dir / "subtitles.srt"  # Copied SRT file
 
-            # Determine output path using original video filename
+            # Use aligned subtitles if available, otherwise use original
+            if hasattr(self, 'aligned_srt_path') and self.aligned_srt_path.exists():
+                srt_path = self.aligned_srt_path
+                print(f"Using aligned subtitles: {srt_path}")
+            else:
+                srt_path = working_dir / "subtitles.srt"  # Copied SRT file
+                print(f"Using original subtitles: {srt_path}")
+
+            # Determine output path using original video filename and source directory
             output_filename = self.original_video_path.name
+            source_dir_name = self.original_video_path.parent.name
 
             if output_dir:
-                output_path = Path(output_dir) / output_filename
+                output_path = Path(output_dir) / source_dir_name / output_filename
                 output_path.parent.mkdir(parents=True, exist_ok=True)
             else:
-                # Use dedicated output directory instead of working directory
-                output_path = self.config.output_dir / output_filename
+                # Use dedicated output directory with source directory subdirectory
+                output_path = self.config.output_dir / source_dir_name / output_filename
                 output_path.parent.mkdir(parents=True, exist_ok=True)
 
             print(f"Creating final video: {output_path}")
@@ -572,6 +625,13 @@ Examples:
                                help='Subtitle codec for embedding (default: mov_text)')
     subtitle_group.add_argument('--subtitle-language', default=None,
                                help='Subtitle language code (default: eng)')
+    subtitle_group.add_argument('--no-align', action='store_true',
+                               help='Disable automatic subtitle alignment with Whisper')
+    subtitle_group.add_argument('--whisper-model', default='large-v3',
+                               choices=['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3'],
+                               help='Whisper model size for subtitle alignment (default: large-v3)')
+    subtitle_group.add_argument('--alignment-padding', type=float, default=0.05,
+                               help='Time padding for aligned subtitles in seconds (default: 0.05)')
 
     # Control options
     parser.add_argument('--cleanup', action='store_true',
@@ -637,6 +697,11 @@ def main():
             config.subtitle_codec = args.subtitle_codec
         if args.subtitle_language is not None:
             config.subtitle_language = args.subtitle_language
+
+        # Subtitle alignment settings
+        config.align_subtitles = not args.no_align
+        config.whisper_model_size = args.whisper_model
+        config.alignment_padding = args.alignment_padding
 
         # Validate required arguments
         if not args.srt and not args.extract_subtitles:

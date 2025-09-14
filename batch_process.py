@@ -13,7 +13,7 @@ import time
 # Configuration
 SOURCE_DIR = Path("/mnt/d/Coloso/Syagamu")
 OUTPUT_DIR = Path("./output")
-CONDA_ACTIVATION = "source /home/ross/miniconda/etc/profile.d/conda.sh && conda activate kokoro"
+CONDA_ACTIVATION = "/bin/bash -c 'source /home/ross/miniconda/etc/profile.d/conda.sh && conda activate kokoro'"
 
 def find_video_subtitle_pairs(source_dir):
     """Find all matching video-subtitle pairs in the source directory."""
@@ -30,16 +30,31 @@ def find_video_subtitle_pairs(source_dir):
         # Get the base name without extension
         base_name = video_path.stem
 
-        # Look for matching SRT file (could be named as base_name.srt or with number prefix)
+        # Look for matching SRT file with multiple naming patterns
         srt_candidates = [
             source_dir / f"{base_name}.srt",
         ]
 
-        # Also check for numbered pattern (e.g., "01.srt" for "01 Before Starting the Class.mp4")
-        # Extract the number prefix if it exists
+        # Extract number prefix patterns for different video naming schemes
         if base_name[:2].isdigit():
+            # Pattern 1: "01.srt" for "01 Before Starting the Class.mp4"
             number_prefix = base_name[:2]
             srt_candidates.append(source_dir / f"{number_prefix}.srt")
+
+            # Pattern 2: "03-1.srt" for "03-1 Setting up Clip Studio Paint..."
+            # Look for dash after the initial digits
+            dash_pos = base_name.find('-')
+            if dash_pos >= 2 and dash_pos < len(base_name) - 1:
+                # Check if there's a digit after the dash
+                next_char_pos = dash_pos + 1
+                if next_char_pos < len(base_name) and base_name[next_char_pos].isdigit():
+                    # Extract up to the next space or end of digits
+                    extended_prefix = base_name[:dash_pos+1]  # "03-"
+                    i = next_char_pos
+                    while i < len(base_name) and base_name[i].isdigit():
+                        extended_prefix += base_name[i]
+                        i += 1
+                    srt_candidates.append(source_dir / f"{extended_prefix}.srt")
 
         # Find the first existing SRT file
         srt_path = None
@@ -64,9 +79,11 @@ def check_output_exists(video_path, output_dir):
 def process_video(video_path, srt_path, verbose=True):
     """Process a single video-subtitle pair."""
     # Build the command
-    cmd = f'{CONDA_ACTIVATION} && python -m dubbing.main --video "{video_path}" --srt "{srt_path}"'
+    python_cmd = f'python -m dubbing.main --video "{video_path}" --srt "{srt_path}"'
     if verbose:
-        cmd += " --verbose"
+        python_cmd += " --verbose"
+
+    cmd = f'/bin/bash -c "source /home/ross/miniconda/etc/profile.d/conda.sh && conda activate kokoro && {python_cmd}"'
 
     print(f"\n{'='*60}")
     print(f"Processing: {video_path.name}")
@@ -140,9 +157,13 @@ def main():
 
     # Ask for confirmation
     print()
-    response = input(f"Process {len(to_process)} videos? (y/n): ").strip().lower()
-    if response != 'y':
-        print("Cancelled by user")
+    try:
+        response = input(f"Process {len(to_process)} videos? (y/n): ").strip().lower()
+        if response != 'y':
+            print("Cancelled by user")
+            return
+    except (EOFError, KeyboardInterrupt):
+        print("Non-interactive environment detected or interrupted - exiting")
         return
 
     # Process each video
@@ -158,9 +179,13 @@ def main():
             failed += 1
             # Ask if user wants to continue after a failure
             if i < len(to_process):
-                response = input("Continue with remaining videos? (y/n): ").strip().lower()
-                if response != 'y':
-                    print("Stopped by user")
+                try:
+                    response = input("Continue with remaining videos? (y/n): ").strip().lower()
+                    if response != 'y':
+                        print("Stopped by user")
+                        break
+                except (EOFError, KeyboardInterrupt):
+                    print("Non-interactive environment - stopping after failure")
                     break
 
     # Final summary

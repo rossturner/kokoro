@@ -88,6 +88,13 @@ VERBOSE_LOGGING = False
 MAX_CONCURRENT_TTS_JOBS = 1       # Keep at 1 for stable Kokoro processing
 AUDIO_CHUNK_SIZE = 1024           # Buffer size for audio processing
 
+# Subtitle Alignment Settings
+ALIGN_SUBTITLES = True            # Enable subtitle alignment with Whisper
+WHISPER_MODEL_SIZE = 'large-v3'   # Whisper model size for alignment
+WHISPER_DEVICE = 'cuda'           # Use GPU acceleration
+WHISPER_COMPUTE_TYPE = 'float16'  # Use float16 for GPU efficiency
+ALIGNMENT_PADDING = 0.05          # Time padding for subtitle display (50ms)
+
 
 class Config:
     """Configuration class with validation and helper methods."""
@@ -132,6 +139,13 @@ class Config:
 
         # Compression preset
         self.compression_preset = 'balanced'
+
+        # Subtitle alignment settings
+        self.align_subtitles = ALIGN_SUBTITLES
+        self.whisper_model_size = WHISPER_MODEL_SIZE
+        self.whisper_device = WHISPER_DEVICE
+        self.whisper_compute_type = WHISPER_COMPUTE_TYPE
+        self.alignment_padding = ALIGNMENT_PADDING
 
     def validate(self) -> list:
         """Validate configuration settings and return any issues."""
@@ -230,7 +244,10 @@ class Config:
             'subtitle_language': self.subtitle_language,
             'subtitle_default': self.subtitle_default,
             'subtitle_forced': self.subtitle_forced,
-            'compression_preset': self.compression_preset
+            'compression_preset': self.compression_preset,
+            'align_subtitles': self.align_subtitles,
+            'whisper_model_size': self.whisper_model_size,
+            'alignment_padding': self.alignment_padding
         }
 
     def from_dict(self, config_dict: dict) -> None:
