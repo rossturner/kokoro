@@ -5,6 +5,7 @@ Coordinates the complete video dubbing pipeline.
 """
 
 import argparse
+import logging
 import sys
 import time
 import json
@@ -12,6 +13,8 @@ from pathlib import Path
 from typing import Optional
 
 from .config import Config, get_default_config
+from .constants import SUPPORTED_SAMPLE_RATES, AVAILABLE_VOICES
+from .utils import validate_file_exists, setup_logging, format_duration
 from .srt_parser import SRTParser
 from .sentence_grouper import SentenceGrouper
 from .tts_generator import TTSGenerator
@@ -24,6 +27,7 @@ class DubbingPipeline:
 
     def __init__(self, config: Config):
         self.config = config
+        self.logger = logging.getLogger(__name__)
         self.parser = SRTParser()
         self.grouper = SentenceGrouper()
         self.tts_generator = TTSGenerator(config)
@@ -65,11 +69,14 @@ class DubbingPipeline:
         self.pipeline_stats['start_time'] = time.time()
 
         try:
+            # Validate inputs
+            self._validate_inputs(video_path, srt_path)
+
             # Setup phase
-            print("=== Video Dubbing Pipeline ===")
-            print(f"Input video: {video_path}")
-            print(f"Input SRT: {srt_path}")
-            print(f"Configuration: {self.config.voice} voice, {self.config.sample_rate}Hz")
+            self.logger.info("=== Video Dubbing Pipeline ===")
+            self.logger.info(f"Input video: {video_path}")
+            self.logger.info(f"Input SRT: {srt_path}")
+            self.logger.info(f"Configuration: {self.config.voice} voice, {self.config.sample_rate}Hz")
 
             # Store original video path for output naming
             self.original_video_path = Path(video_path)
@@ -79,7 +86,7 @@ class DubbingPipeline:
                 video_name = self.original_video_path.stem
 
             working_dir = self.config.create_working_dir(video_name)
-            print(f"Working directory: {working_dir}")
+            self.logger.info(f"Working directory: {working_dir}")
 
             # Phase 1: File setup and validation
             if not self._setup_files(video_path, srt_path, working_dir):
@@ -120,6 +127,30 @@ class DubbingPipeline:
             return False
         finally:
             self.tts_generator.cleanup()
+
+    def _validate_inputs(self, video_path: str, srt_path: str) -> None:
+        """Validate input files and configuration."""
+        self.logger.debug("Validating inputs")
+
+        # Validate input files exist
+        validate_file_exists(Path(video_path), "video file")
+        validate_file_exists(Path(srt_path), "SRT file")
+
+        # Validate configuration
+        if self.config.voice not in AVAILABLE_VOICES:
+            raise ValueError(f"Invalid voice '{self.config.voice}'. Available: {AVAILABLE_VOICES}")
+
+        if self.config.sample_rate not in SUPPORTED_SAMPLE_RATES:
+            raise ValueError(f"Invalid sample rate {self.config.sample_rate}Hz. Supported: {SUPPORTED_SAMPLE_RATES}")
+
+        # Check file extensions
+        video_ext = Path(video_path).suffix.lower()
+        if video_ext not in ['.mp4', '.mkv', '.avi', '.mov', '.wmv']:
+            self.logger.warning(f"Unsupported video format: {video_ext}")
+
+        srt_ext = Path(srt_path).suffix.lower()
+        if srt_ext != '.srt':
+            self.logger.warning(f"Expected .srt file, got: {srt_ext}")
 
     def _setup_files(self, video_path: str, srt_path: str, working_dir: Path) -> bool:
         """Setup phase: copy and validate input files."""
@@ -345,12 +376,19 @@ class DubbingPipeline:
 
             print(f"Creating final video: {output_path}")
 
-            # Force simple video creation mode for reliability
+            # Choose video creation method based on configuration
             video_start_time = time.time()
-            print("Using standard mode (no compression, no subtitle embedding)...")
-            result = self.video_processor.create_dubbed_video(
-                video_path, audio_path, output_path
-            )
+
+            if self.config.enable_video_compression or self.config.embed_subtitles:
+                print("Using enhanced mode (with compression and/or subtitle embedding)...")
+                result = self.video_processor.create_dubbed_video_with_compression_and_subtitles(
+                    self.working_video_path, audio_path, srt_path, output_path
+                )
+            else:
+                print("Using standard mode (no compression, no subtitle embedding)...")
+                result = self.video_processor.create_dubbed_video(
+                    video_path, audio_path, output_path
+                )
 
             video_processing_time = time.time() - video_start_time
             self.pipeline_stats['video_processing_time'] = video_processing_time
@@ -526,6 +564,11 @@ def main():
     args = parser.parse_args()
 
     try:
+        # Setup logging first
+        log_level = "DEBUG" if args.verbose else "INFO"
+        setup_logging(log_level)
+        logger = logging.getLogger(__name__)
+
         # Load configuration
         if args.config:
             from .config import load_config_from_file

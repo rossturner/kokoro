@@ -3,17 +3,29 @@ TTS Generator Module
 Generates audio snippets using Kokoro TTS for sentence groups.
 """
 
-import os
+import logging
 import time
 import soundfile as sf
 import numpy as np
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import List, Optional, Dict, Callable
 from dataclasses import dataclass
 
 from kokoro import KPipeline
 from .sentence_grouper import SentenceGroup
 from .config import Config
+from .constants import (
+    AUDIO_SUBTYPE, PROGRESS_REPORT_INTERVAL,
+    HIGH_FAILURE_RATE_THRESHOLD
+)
+from .utils import (
+    normalize_audio, clean_text_for_tts, ProgressReporter,
+    format_duration
+)
+
+logger = logging.getLogger(__name__)
+
+__all__ = ['TTSGenerator', 'AudioResult']
 
 
 @dataclass
@@ -41,22 +53,23 @@ class TTSGenerator:
             'total_audio_duration': 0.0,
             'average_generation_time': 0.0
         }
+        self.logger = logger
 
     def initialize_pipeline(self) -> bool:
         """Initialize the Kokoro TTS pipeline."""
         try:
-            print(f"Initializing Kokoro pipeline with voice: {self.config.voice}")
+            self.logger.info(f"Initializing Kokoro pipeline with voice: {self.config.voice}")
             start_time = time.time()
 
             # Initialize with American English and specified voice
             self.pipeline = KPipeline(lang_code='a')
 
             init_time = time.time() - start_time
-            print(f"Pipeline initialized successfully in {init_time:.2f}s")
+            self.logger.info(f"Pipeline initialized successfully in {format_duration(init_time)}")
             return True
 
         except Exception as e:
-            print(f"Failed to initialize Kokoro pipeline: {e}")
+            self.logger.error(f"Failed to initialize Kokoro pipeline: {e}")
             return False
 
     def generate_sentence_audio(
@@ -107,10 +120,9 @@ class TTSGenerator:
             start_time = time.time()
 
             # Clean the text for TTS
-            cleaned_text = self._clean_text_for_tts(sentence_group.text)
+            cleaned_text = clean_text_for_tts(sentence_group.text)
 
-            if self.config.verbose_logging:
-                print(f"Generating audio for sentence {sentence_group.sentence_id}: {cleaned_text[:50]}...")
+            self.logger.debug(f"Generating audio for sentence {sentence_group.sentence_id}: {cleaned_text[:50]}...")
 
             # Generate TTS audio
             generator = self.pipeline(cleaned_text, voice=self.config.voice)
@@ -122,8 +134,7 @@ class TTSGenerator:
                     audio_np = audio.numpy()
                     audio_chunks.append(audio_np)
 
-                    if self.config.verbose_logging:
-                        print(f"  Chunk {i}: {audio_np.shape}")
+                    self.logger.debug(f"  Chunk {i}: {audio_np.shape}")
 
             if not audio_chunks:
                 return AudioResult(
@@ -139,7 +150,7 @@ class TTSGenerator:
             final_audio = np.concatenate(audio_chunks)
 
             # Normalize audio to prevent clipping
-            final_audio = self._normalize_audio(final_audio)
+            final_audio = normalize_audio(final_audio)
 
             # Save audio file
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,7 +158,7 @@ class TTSGenerator:
                 output_path,
                 final_audio,
                 self.config.sample_rate,
-                subtype='PCM_16'
+                subtype=AUDIO_SUBTYPE
             )
 
             generation_time = time.time() - start_time
@@ -158,8 +169,7 @@ class TTSGenerator:
             self.generation_stats['total_duration'] += generation_time
             self.generation_stats['total_audio_duration'] += audio_duration
 
-            if self.config.verbose_logging:
-                print(f"  Generated {audio_duration:.2f}s audio in {generation_time:.2f}s")
+            self.logger.debug(f"Generated {format_duration(audio_duration)} audio in {format_duration(generation_time)}")
 
             return AudioResult(
                 sentence_id=sentence_group.sentence_id,
@@ -171,7 +181,7 @@ class TTSGenerator:
 
         except Exception as e:
             error_msg = f"TTS generation failed: {e}"
-            print(f"Error generating audio for sentence {sentence_group.sentence_id}: {error_msg}")
+            self.logger.error(f"Error generating audio for sentence {sentence_group.sentence_id}: {error_msg}")
 
             self.generation_stats['failed_generations'] += 1
 
@@ -188,7 +198,7 @@ class TTSGenerator:
         self,
         sentence_groups: List[SentenceGroup],
         working_dir: Path,
-        progress_callback: Optional[callable] = None
+        progress_callback: Optional[Callable] = None
     ) -> List[AudioResult]:
         """
         Generate TTS audio for all sentence groups.
@@ -203,83 +213,61 @@ class TTSGenerator:
         """
         if not self.pipeline:
             if not self.initialize_pipeline():
+                self.logger.error("Failed to initialize TTS pipeline")
                 return []
 
         results = []
         self.generation_stats['total_sentences'] = len(sentence_groups)
 
-        print(f"Generating TTS audio for {len(sentence_groups)} sentences...")
+        with ProgressReporter("TTS generation", len(sentence_groups), "dubbing.tts") as progress:
+            for i, sentence_group in enumerate(sentence_groups):
+                # Get output path for this sentence
+                audio_path = self.config.get_audio_snippet_path(working_dir, sentence_group.sentence_id)
 
-        for i, sentence_group in enumerate(sentence_groups):
-            # Get output path for this sentence
-            audio_path = self.config.get_audio_snippet_path(working_dir, sentence_group.sentence_id)
+                # Generate audio
+                result = self.generate_sentence_audio(sentence_group, audio_path)
+                results.append(result)
 
-            # Generate audio
-            result = self.generate_sentence_audio(sentence_group, audio_path)
-            results.append(result)
+                # Progress callback
+                if progress_callback:
+                    progress_callback(i + 1, len(sentence_groups), result)
 
-            # Progress callback
-            if progress_callback:
-                progress_callback(i + 1, len(sentence_groups), result)
+                # Update progress
+                progress.update()
 
-            # Simple progress indicator
-            if (i + 1) % 10 == 0 or i == len(sentence_groups) - 1:
-                success_rate = self.generation_stats['successful_generations'] / (i + 1) * 100
-                print(f"Progress: {i + 1}/{len(sentence_groups)} ({success_rate:.1f}% success)")
+                # Check for high failure rate
+                if i > 10:  # Only check after some samples
+                    failure_rate = self.generation_stats['failed_generations'] / (i + 1)
+                    if failure_rate > HIGH_FAILURE_RATE_THRESHOLD:
+                        self.logger.warning(f"High TTS failure rate: {failure_rate*100:.1f}%")
 
         self._finalize_stats()
+        self._log_generation_summary()
         return results
 
-    def _clean_text_for_tts(self, text: str) -> str:
-        """Clean text for optimal TTS generation."""
-        # Remove extra whitespace
-        text = ' '.join(text.split())
+    def _log_generation_summary(self) -> None:
+        """Log a summary of TTS generation results."""
+        stats = self.generation_stats
+        total = stats['total_sentences']
+        successful = stats['successful_generations']
+        failed = stats['failed_generations']
 
-        # Handle common text-to-speech issues
-        replacements = {
-            '&': 'and',
-            '@': 'at',
-            '%': 'percent',
-            '#': 'hashtag',
-            '$': 'dollar',
-            '€': 'euro',
-            '£': 'pound',
-            '¥': 'yen',
-            '©': 'copyright',
-            '®': 'registered',
-            '™': 'trademark',
-            '...': '. . .',  # Make ellipsis more pronounceable
-            '--': ', ',      # Replace dashes with pauses
-        }
+        if total > 0:
+            success_rate = (successful / total) * 100
+            self.logger.info(f"TTS Generation Summary: {successful}/{total} successful ({success_rate:.1f}%)")
 
-        for old, new in replacements.items():
-            text = text.replace(old, new)
+            if failed > 0:
+                self.logger.warning(f"TTS Generation Failures: {failed} sentences failed")
 
-        # Ensure proper sentence ending
-        if text and not text.endswith(('.', '!', '?')):
-            text += '.'
+            if successful > 0:
+                avg_time = stats['average_generation_time']
+                total_audio = stats['total_audio_duration']
+                total_time = stats['total_duration']
+                speed = total_audio / total_time if total_time > 0 else 0
 
-        return text
-
-    def _normalize_audio(self, audio: np.ndarray) -> np.ndarray:
-        """Normalize audio to prevent clipping and ensure proper range."""
-        if len(audio) == 0:
-            return audio
-
-        # Find peak amplitude
-        max_amplitude = max(abs(audio.max()), abs(audio.min()))
-
-        if max_amplitude > 1.0:
-            # Normalize to prevent clipping
-            audio = audio / max_amplitude
-        elif max_amplitude < 0.1:
-            # Boost very quiet audio (but be conservative)
-            audio = audio * (0.5 / max_amplitude)
-
-        # Apply soft limiting to prevent any remaining issues
-        audio = np.tanh(audio * 0.9) * 0.95
-
-        return audio
+                self.logger.info(f"Average generation time: {format_duration(avg_time)} per sentence")
+                self.logger.info(f"Total audio generated: {format_duration(total_audio)}")
+                self.logger.info(f"Generation speed: {speed:.2f}x real-time")
 
     def _finalize_stats(self) -> None:
         """Calculate final statistics after all generations."""
@@ -294,24 +282,15 @@ class TTSGenerator:
         return self.generation_stats.copy()
 
     def print_stats(self) -> None:
-        """Print generation statistics."""
-        stats = self.generation_stats
-        total = stats['total_sentences']
-        successful = stats['successful_generations']
-        failed = stats['failed_generations']
-
-        print(f"\nTTS Generation Statistics:")
-        print(f"  Total sentences: {total}")
-        print(f"  Successful: {successful} ({successful/total*100:.1f}%)")
-        print(f"  Failed: {failed} ({failed/total*100:.1f}%)")
-        if successful > 0:
-            print(f"  Average generation time: {stats['average_generation_time']:.2f}s per sentence")
-            print(f"  Total audio generated: {stats['total_audio_duration']:.1f}s")
-            print(f"  Generation speed: {stats['total_audio_duration']/stats['total_duration']:.2f}x real-time")
+        """Print generation statistics (deprecated - use logging instead)."""
+        self.logger.warning("print_stats() is deprecated, statistics are now logged automatically")
+        self._log_generation_summary()
 
     def cleanup(self) -> None:
         """Clean up resources."""
-        self.pipeline = None
+        if self.pipeline:
+            self.logger.debug("Cleaning up TTS pipeline")
+            self.pipeline = None
 
 
 def main():
@@ -319,43 +298,32 @@ def main():
     from .srt_parser import SRTParser
     from .sentence_grouper import SentenceGrouper
     from .config import get_default_config
+    from .utils import setup_logging
+
+    setup_logging("DEBUG")
+    logger = logging.getLogger(__name__)
 
     config = get_default_config()
-    config.verbose_logging = True
-
     parser = SRTParser()
     grouper = SentenceGrouper()
     tts_generator = TTSGenerator(config)
 
     try:
         # Parse and group sentences
-        print("Parsing SRT file...")
+        logger.info("Testing TTS generator")
         entries = parser.parse_file('/mnt/d/Coloso/Syagamu/01.srt')
-        print(f"Parsed {len(entries)} entries")
-
-        print("Grouping sentences...")
-        sentences = grouper.group_sentences(entries[:10])  # Test with first 10 entries
-        print(f"Created {len(sentences)} sentence groups")
-
-        # Create working directory
+        sentences = grouper.group_sentences(entries[:5])  # Test with first 5 entries
         working_dir = config.create_working_dir("test_tts")
 
-        # Generate TTS for all sentences
+        # Generate TTS for sentences
         results = tts_generator.generate_all_sentences(sentences, working_dir)
 
-        # Show results
-        print(f"\nGenerated audio for {len(results)} sentences")
-        for result in results:
-            status = "SUCCESS" if result.success else f"FAILED: {result.error_message}"
-            print(f"Sentence {result.sentence_id}: {status}")
-            if result.success:
-                print(f"  Duration: {result.duration:.2f}s")
-                print(f"  File: {result.audio_path}")
-
-        tts_generator.print_stats()
+        # Log results summary
+        successful = sum(1 for r in results if r.success)
+        logger.info(f"Test completed: {successful}/{len(results)} successful generations")
 
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"Test failed: {e}")
         import traceback
         traceback.print_exc()
     finally:
