@@ -20,6 +20,7 @@ from .sentence_grouper import SentenceGrouper
 from .tts_generator import TTSGenerator
 from .audio_assembler import AudioAssembler
 from .video_processor import VideoProcessor
+from .subtitle_extractor import SubtitleExtractor
 
 
 class DubbingPipeline:
@@ -523,8 +524,8 @@ Examples:
     # Required arguments
     parser.add_argument('--video', required=True,
                        help='Path to input video file')
-    parser.add_argument('--srt', required=True,
-                       help='Path to input SRT subtitle file')
+    parser.add_argument('--srt', required=False,
+                       help='Path to input SRT subtitle file (optional if using --extract-subtitles)')
 
     # Optional arguments
     parser.add_argument('--output-dir', default=None,
@@ -532,7 +533,7 @@ Examples:
     parser.add_argument('--working-dir', default=None,
                        help='Working directory for processing (default: ./working/[video_name])')
     parser.add_argument('--voice', default='af_heart',
-                       choices=['af_heart', 'af_sky', 'af_bella', 'af_nicole', 'am_adam', 'am_michael'],
+                       choices=AVAILABLE_VOICES,
                        help='Kokoro TTS voice to use (default: af_heart)')
 
     # Processing options
@@ -558,6 +559,12 @@ Examples:
 
     # New subtitle options
     subtitle_group = parser.add_argument_group('Subtitle Options')
+    subtitle_group.add_argument('--extract-subtitles', action='store_true',
+                               help='Extract embedded subtitles from video file')
+    subtitle_group.add_argument('--subtitle-track', type=int, default=None,
+                               help='Subtitle track index to extract (default: first available)')
+    subtitle_group.add_argument('--subtitle-language-select', default=None,
+                               help='Select subtitle track by language code (e.g., eng, spa)')
     subtitle_group.add_argument('--no-subtitles', action='store_true',
                                help='Disable subtitle embedding (audio-only dubbing)')
     subtitle_group.add_argument('--subtitle-codec', default=None,
@@ -631,6 +638,49 @@ def main():
         if args.subtitle_language is not None:
             config.subtitle_language = args.subtitle_language
 
+        # Validate required arguments
+        if not args.srt and not args.extract_subtitles:
+            print("Error: Either --srt or --extract-subtitles must be provided")
+            return 1
+
+        # Handle subtitle extraction
+        srt_path = args.srt
+        if args.extract_subtitles:
+            logger.info("Extracting embedded subtitles from video...")
+            extractor = SubtitleExtractor()
+
+            # Show available subtitle tracks
+            subtitle_info = extractor.get_subtitle_info(args.video)
+            if not subtitle_info['has_subtitles']:
+                print("Error: No embedded subtitle tracks found in video file")
+                return 1
+
+            print(f"Found {subtitle_info['track_count']} subtitle track(s):")
+            for track in subtitle_info['tracks']:
+                default_marker = " [DEFAULT]" if track['default'] else ""
+                print(f"  Track {track['index']}: {track['codec']}, "
+                      f"language={track['language']}{default_marker}")
+
+            # Extract to temporary file in working directory
+            video_name = Path(args.video).stem
+            temp_working_dir = config.working_dir / video_name
+            temp_working_dir.mkdir(parents=True, exist_ok=True)
+            extracted_srt_path = temp_working_dir / "extracted_subtitles.srt"
+
+            success = extractor.extract_subtitles(
+                args.video,
+                str(extracted_srt_path),
+                track_index=args.subtitle_track,
+                language=args.subtitle_language_select
+            )
+
+            if not success:
+                print("Error: Failed to extract subtitles from video")
+                return 1
+
+            srt_path = str(extracted_srt_path)
+            print(f"Extracted subtitles to: {srt_path}")
+
         # Validate configuration
         issues = config.validate()
         if issues:
@@ -646,7 +696,7 @@ def main():
         pipeline = DubbingPipeline(config)
         success = pipeline.process_video(
             args.video,
-            args.srt,
+            srt_path,
             args.output_dir,
             Path(args.video).stem
         )

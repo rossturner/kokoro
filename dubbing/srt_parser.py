@@ -124,13 +124,36 @@ class SRTParser:
         return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000
 
     def _clean_text(self, text: str) -> str:
-        """Clean subtitle text by removing extra whitespace and normalizing."""
+        """Clean subtitle text by removing extra whitespace, HTML tags, and normalizing."""
+        # Remove HTML/XML tags first
+        text = self._remove_html_tags(text)
+
         # Replace newlines with spaces for multi-line entries
         text = re.sub(r'\n+', ' ', text)
         # Remove extra whitespace
         text = re.sub(r'\s+', ' ', text)
         # Strip leading/trailing whitespace
         text = text.strip()
+        return text
+
+    def _remove_html_tags(self, text: str) -> str:
+        """Remove HTML/XML tags from subtitle text while preserving content."""
+        # Remove common subtitle HTML tags
+        # Handle <font> tags with attributes
+        text = re.sub(r'<font[^>]*>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'</font>', '', text, flags=re.IGNORECASE)
+
+        # Handle other common formatting tags
+        text = re.sub(r'</?b>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'</?i>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'</?u>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'</?em>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'</?strong>', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'</?span[^>]*>', '', text, flags=re.IGNORECASE)
+
+        # Generic cleanup for any remaining tags
+        text = re.sub(r'<[^>]+>', '', text)
+
         return text
 
     def _is_subtitle_instruction(self, text: str) -> bool:

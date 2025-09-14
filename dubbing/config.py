@@ -4,20 +4,10 @@ Central configuration settings for the dubbing system.
 """
 
 from pathlib import Path
+from .constants import DEFAULT_VOICE, AVAILABLE_VOICES, DEFAULT_SAMPLE_RATE
 
 # TTS Configuration
-DEFAULT_VOICE = 'af_heart'
-SAMPLE_RATE = 24000
-
-# Available Kokoro voices
-AVAILABLE_VOICES = [
-    'af_heart',
-    'af_sky',
-    'af_bella',
-    'af_nicole',
-    'am_adam',
-    'am_michael'
-]
+SAMPLE_RATE = DEFAULT_SAMPLE_RATE
 
 # Timing Configuration
 MIN_SENTENCE_GAP = 0.250           # 250ms minimum gap between sentences when overflow occurs
