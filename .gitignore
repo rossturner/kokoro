@@ -1,3 +1,7 @@
+# Dubbing System Output
+output/
+working/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -173,7 +177,6 @@ cython_debug/
 # Project-specific ignores
 .idea
 working/
-dubbing/
 test_kokoro.py
 condaenv.*.requirements.txt
 =0.9.4
