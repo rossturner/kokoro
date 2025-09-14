@@ -337,7 +337,7 @@ if __name__ == "__main__":
 
             # Find the best match in transcription
             match_start, match_end, confidence = self._find_text_match_in_transcription(
-                subtitle_text, word_timestamps, transcription_text
+                subtitle_text, word_timestamps, transcription_text, entry.start_time, entry.end_time
             )
 
             if match_start is None or match_end is None:
@@ -375,9 +375,11 @@ if __name__ == "__main__":
         self,
         subtitle_text: str,
         word_timestamps: List[WordTimestamp],
-        transcription_text: str
+        transcription_text: str,
+        original_start: float,
+        original_end: float
     ) -> Tuple[Optional[float], Optional[float], float]:
-        """Find where subtitle text appears in the transcribed word timestamps."""
+        """Find where subtitle text appears in the transcribed word timestamps with temporal proximity."""
         try:
             # Split subtitle into words for matching
             subtitle_words = subtitle_text.split()
@@ -385,29 +387,54 @@ if __name__ == "__main__":
             if not subtitle_words:
                 return None, None, 0.0
 
-            # Find best sequence match in word timestamps
+            # Calculate time window for searching (±15 seconds by default)
+            window_size = self.config.alignment_time_window / 2.0
+            search_start = max(0, original_start - window_size)
+            search_end = original_start + window_size
+
+            # Filter word timestamps to those within the time window
+            candidate_words = [
+                wt for wt in word_timestamps
+                if search_start <= wt.start <= search_end
+            ]
+
+            if not candidate_words:
+                # Fallback: use all words if none in time window
+                candidate_words = word_timestamps
+
+            # Find best sequence match in candidate word timestamps
             best_match_start = None
             best_match_end = None
             best_score = 0.0
 
             # Try to find consecutive word matches
-            for i in range(len(word_timestamps) - len(subtitle_words) + 1):
+            for i in range(len(candidate_words) - len(subtitle_words) + 1):
                 # Extract sequence of words from timestamps
                 word_sequence = []
                 for j in range(len(subtitle_words)):
-                    if i + j < len(word_timestamps):
-                        word_sequence.append(word_timestamps[i + j].word.lower().strip())
+                    if i + j < len(candidate_words):
+                        word_sequence.append(candidate_words[i + j].word.lower().strip())
 
                 # Calculate similarity score
                 transcribed_phrase = " ".join(word_sequence)
-                similarity = SequenceMatcher(None, subtitle_text, transcribed_phrase).ratio()
+                text_similarity = SequenceMatcher(None, subtitle_text, transcribed_phrase).ratio()
 
-                if similarity > best_score and similarity > 0.5:  # Minimum 50% similarity
-                    best_score = similarity
-                    best_match_start = word_timestamps[i].start
-                    best_match_end = word_timestamps[min(i + len(subtitle_words) - 1, len(word_timestamps) - 1)].end
+                if text_similarity > 0.5:  # Minimum 50% text similarity
+                    # Add temporal proximity bonus
+                    candidate_start = candidate_words[i].start
+                    time_distance = abs(candidate_start - original_start)
 
-            # If no good match found, try fuzzy matching individual words
+                    # Temporal proximity score: closer matches get higher scores
+                    # Score decreases linearly with distance, max bonus of 0.3
+                    temporal_bonus = max(0, 0.3 * (1 - time_distance / window_size))
+                    combined_score = text_similarity + temporal_bonus
+
+                    if combined_score > best_score:
+                        best_score = combined_score
+                        best_match_start = candidate_words[i].start
+                        best_match_end = candidate_words[min(i + len(subtitle_words) - 1, len(candidate_words) - 1)].end
+
+            # If no good match found, try fuzzy matching individual words within time window
             if best_match_start is None:
                 first_word = subtitle_words[0].lower()
                 last_word = subtitle_words[-1].lower()
@@ -415,21 +442,21 @@ if __name__ == "__main__":
                 first_match_idx = None
                 last_match_idx = None
 
-                # Find first word
-                for i, wt in enumerate(word_timestamps):
+                # Find first word in candidate words (time-filtered)
+                for i, wt in enumerate(candidate_words):
                     if self._words_similar(first_word, wt.word.lower().strip()):
                         first_match_idx = i
                         break
 
                 # Find last word (searching from first match onwards)
                 if first_match_idx is not None:
-                    for i in range(first_match_idx, min(first_match_idx + len(subtitle_words) * 2, len(word_timestamps))):
-                        if self._words_similar(last_word, word_timestamps[i].word.lower().strip()):
+                    for i in range(first_match_idx, min(first_match_idx + len(subtitle_words) * 2, len(candidate_words))):
+                        if self._words_similar(last_word, candidate_words[i].word.lower().strip()):
                             last_match_idx = i
 
                 if first_match_idx is not None and last_match_idx is not None:
-                    best_match_start = word_timestamps[first_match_idx].start
-                    best_match_end = word_timestamps[last_match_idx].end
+                    best_match_start = candidate_words[first_match_idx].start
+                    best_match_end = candidate_words[last_match_idx].end
                     best_score = 0.3  # Lower confidence for fuzzy match
 
             return best_match_start, best_match_end, best_score

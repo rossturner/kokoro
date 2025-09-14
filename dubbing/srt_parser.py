@@ -158,16 +158,9 @@ class SRTParser:
 
     def _is_subtitle_instruction(self, text: str) -> bool:
         """Check if the text appears to be a subtitle instruction rather than dialogue."""
-        text_lower = text.lower()
-        instruction_keywords = [
-            'turn off the subtitles',
-            'click [setting]',
-            'tooltips',
-            'setting',
-            'close for mobile'
-        ]
-
-        return any(keyword in text_lower for keyword in instruction_keywords)
+        text_stripped = text.strip()
+        # Only filter out entries that start with "If you want to turn off the subtitles"
+        return text_stripped.startswith("If you want to turn off the subtitles")
 
     def get_total_duration(self, entries: List[SubtitleEntry]) -> float:
         """Get the total duration covered by subtitle entries."""

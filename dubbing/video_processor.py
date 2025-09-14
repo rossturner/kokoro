@@ -260,6 +260,52 @@ class VideoProcessor:
         except Exception as e:
             raise RuntimeError(f"Failed to copy files to working directory: {e}")
 
+    def copy_srt_to_working_dir(
+        self,
+        srt_path: str,
+        working_dir: Path
+    ) -> Tuple[Path, Dict[str, bool]]:
+        """
+        Copy only SRT file to working directory, skipping if identical file exists.
+
+        This method replaces the video copying functionality - we now read video files
+        directly from their original location (READ-ONLY access) to save disk space and time.
+
+        Args:
+            srt_path: Path to original SRT file
+            working_dir: Working directory path
+
+        Returns:
+            Tuple of (copied_srt_path, copy_status_dict)
+            copy_status_dict contains 'srt_copied' boolean
+        """
+        try:
+            srt_src = Path(srt_path)
+
+            if not srt_src.exists():
+                raise FileNotFoundError(f"SRT file not found: {srt_path}")
+
+            # Create working directory if it doesn't exist
+            working_dir.mkdir(parents=True, exist_ok=True)
+
+            # Define destination path
+            srt_dst = working_dir / "subtitles.srt"
+
+            copy_status = {'srt_copied': False}
+
+            # Check and copy SRT file (always use hash for small text files)
+            if srt_dst.exists() and self._get_file_hash(srt_src) == self._get_file_hash(srt_dst):
+                print(f"SRT file already exists and is identical, skipping copy: {srt_dst}")
+            else:
+                print(f"Copying SRT file: {srt_src} -> {srt_dst}")
+                shutil.copy2(srt_src, srt_dst)
+                copy_status['srt_copied'] = True
+
+            return srt_dst, copy_status
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to copy SRT file to working directory: {e}")
+
     def strip_audio_from_video(
         self,
         input_video: Path,
@@ -361,7 +407,6 @@ class VideoProcessor:
                 '-i', str(audio_path),
                 '-c:v', 'copy',  # Copy video without re-encoding
                 '-c:a', self.config.audio_codec,  # Audio codec
-                '-shortest',  # End when shortest input ends
                 '-y'  # Overwrite output file
             ]
 
@@ -424,8 +469,12 @@ class VideoProcessor:
         """
         Create final dubbed video by replacing audio track.
 
+        IMPORTANT: This method reads from the original video file in READ-ONLY mode.
+        The original video file is NEVER modified - only used as input to create
+        a new dubbed video file with replaced audio.
+
         Args:
-            original_video: Original video file
+            original_video: Original video file (accessed READ-ONLY)
             dubbed_audio: Generated TTS audio file
             output_path: Final dubbed video output path
             temp_dir: Optional temporary directory for intermediate files
@@ -477,6 +526,10 @@ class VideoProcessor:
     ) -> ProcessingResult:
         """
         Create final dubbed video with compression and embedded subtitles.
+
+        IMPORTANT: This method reads from the original video file in READ-ONLY mode.
+        The original video file is NEVER modified - only used as input to create
+        a new dubbed video file with replaced audio, compression, and subtitles.
 
         This method creates Handbrake-like output:
         - Replaces original audio with Kokoro TTS
@@ -609,7 +662,6 @@ class VideoProcessor:
 
             # Additional optimizations
             '-movflags', '+faststart',  # Enable fast start for web streaming
-            '-shortest',  # End when shortest input ends
 
             '-y',  # Overwrite output
             str(output)

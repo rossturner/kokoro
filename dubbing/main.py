@@ -35,6 +35,8 @@ class DubbingPipeline:
         self.tts_generator = TTSGenerator(config)
         self.assembler = AudioAssembler(config)
         self.video_processor = VideoProcessor(config)
+
+        # Initialize subtitle aligners
         self.subtitle_aligner = SubtitleAligner(config)
 
         # Pipeline statistics
@@ -111,14 +113,18 @@ class DubbingPipeline:
             if not self._assemble_audio(working_dir):
                 return False
 
-            # Phase 5.5: Align subtitle timings (if enabled)
-            if self.config.align_subtitles:
-                if not self._align_subtitle_timings(working_dir):
-                    print("Warning: Subtitle alignment failed, continuing with original timings")
+            # Phase 5.5: Align subtitle timings (always run)
+            if not self._align_subtitle_timings(working_dir):
+                print("Error: Subtitle alignment failed")
+                return False
 
             # Phase 6: Create final video
             if not self._create_final_video(working_dir, output_dir):
                 return False
+
+            # Phase 7: Verify subtitle integrity
+            if not self._verify_subtitle_integrity(working_dir):
+                print("Warning: Subtitle verification failed, but processing will continue")
 
             # Success!
             self._finalize_pipeline(working_dir)
@@ -161,7 +167,7 @@ class DubbingPipeline:
             self.logger.warning(f"Expected .srt file, got: {srt_ext}")
 
     def _setup_files(self, video_path: str, srt_path: str, working_dir: Path) -> bool:
-        """Setup phase: copy and validate input files."""
+        """Setup phase: validate input files and copy SRT only."""
         print("\n=== Phase 1: File Setup ===")
 
         try:
@@ -181,32 +187,20 @@ class DubbingPipeline:
             if not video_info.has_audio:
                 print("Warning: Input video has no audio track")
 
-            # Copy files to working directory (or skip if identical)
-            video_copy, srt_copy, copy_status = self.video_processor.copy_files_to_working_dir(
-                video_path, srt_path, working_dir
+            # Store original video path - IMPORTANT: Video is accessed READ-ONLY, never modified
+            self.original_video_path_for_processing = Path(video_path)
+            print(f"Using original video file (read-only): {video_path}")
+
+            # Only copy SRT file to working directory for processing
+            srt_copy, copy_status = self.video_processor.copy_srt_to_working_dir(
+                srt_path, working_dir
             )
 
-            # Store the copied video path for later use
-            self.working_video_path = video_copy
-
             # Report file setup results
-            copied_files = []
-            skipped_files = []
-
-            if copy_status['video_copied']:
-                copied_files.append('video')
-            else:
-                skipped_files.append('video')
-
             if copy_status['srt_copied']:
-                copied_files.append('SRT')
+                print("SRT file copied to working directory")
             else:
-                skipped_files.append('SRT')
-
-            if copied_files:
-                print(f"Files copied: {', '.join(copied_files)}")
-            if skipped_files:
-                print(f"Files skipped (already identical): {', '.join(skipped_files)}")
+                print("SRT file skipped (already identical)")
 
             print("File setup completed")
             self.pipeline_stats['steps_completed'].append('file_setup')
@@ -386,14 +380,14 @@ class DubbingPipeline:
         print("\n=== Phase 5.5: Align Subtitle Timings ===")
 
         try:
-            # Get paths
-            final_audio_path = self.config.get_final_audio_path(working_dir)
+            # Use sequential alignment with GPU acceleration
+            print("Using sequential alignment processing with GPU acceleration...")
             aligned_srt_path = working_dir / "subtitles_aligned.srt"
+            final_audio_path = self.config.get_final_audio_path(working_dir)
 
             # Get timeline events for debugging
             timeline_events = getattr(self.assembler, 'timeline', None)
 
-            # Align subtitles with word-level timestamps
             success = self.subtitle_aligner.align_subtitles(
                 self.subtitle_entries,
                 final_audio_path,
@@ -424,7 +418,8 @@ class DubbingPipeline:
         print("\n=== Phase 6: Create Final Video ===")
 
         try:
-            video_path = self.working_video_path  # Use stored copied video file path
+            # Use original video file (READ-ONLY access - never modified)
+            video_path = self.original_video_path_for_processing
             audio_path = self.config.get_final_audio_path(working_dir)
 
             # Use aligned subtitles if available, otherwise use original
@@ -455,7 +450,7 @@ class DubbingPipeline:
             if self.config.enable_video_compression or self.config.embed_subtitles:
                 print("Using enhanced mode (with compression and/or subtitle embedding)...")
                 result = self.video_processor.create_dubbed_video_with_compression_and_subtitles(
-                    self.working_video_path, audio_path, srt_path, output_path
+                    video_path, audio_path, srt_path, output_path
                 )
             else:
                 print("Using standard mode (no compression, no subtitle embedding)...")
@@ -488,7 +483,7 @@ class DubbingPipeline:
             # Show compression statistics if compression was used
             if self.config.enable_video_compression:
                 compression_stats = self.video_processor.get_compression_stats(
-                    self.working_video_path, output_path
+                    video_path, output_path
                 )
 
                 if 'error' not in compression_stats:
@@ -511,6 +506,88 @@ class DubbingPipeline:
 
         except Exception as e:
             print(f"Video creation failed: {e}")
+            return False
+
+    def _verify_subtitle_integrity(self, working_dir: Path) -> bool:
+        """Verify that all original subtitle entries are preserved in aligned subtitles."""
+        print("\n=== Phase 7: Verify Subtitle Integrity ===")
+
+        try:
+            # Parse original subtitles (before any processing)
+            original_srt_path = working_dir / "subtitles.srt"
+            if not original_srt_path.exists():
+                print("Warning: Original SRT file not found for verification")
+                return False
+
+            # Parse original subtitles with the same settings used in processing
+            original_parser = SRTParser()
+            original_entries = original_parser.parse_file(
+                str(original_srt_path),
+                skip_subtitle_instructions=self.config.skip_subtitle_instructions
+            )
+
+            # Check if we have aligned subtitles to compare
+            aligned_srt_path = working_dir / "subtitles_aligned.srt"
+            if not aligned_srt_path.exists():
+                print("No aligned subtitles found - skipping verification")
+                return True
+
+            # Parse aligned subtitles
+            aligned_parser = SRTParser()
+            aligned_entries = aligned_parser.parse_file(
+                str(aligned_srt_path),
+                skip_subtitle_instructions=False  # Don't skip anything in aligned file
+            )
+
+            # Compare by content and position rather than ID
+            print(f"Original subtitles: {len(original_entries)} entries")
+            print(f"Aligned subtitles: {len(aligned_entries)} entries")
+
+            # Check if count matches (allowing for subtitle instruction skipping)
+            if len(aligned_entries) != len(original_entries):
+                print(f"ℹ️  Entry count difference: {len(original_entries) - len(aligned_entries)}")
+                if len(aligned_entries) < len(original_entries):
+                    # Check if this matches the expected skip of subtitle instructions
+                    expected_skipped = 1 if self.config.skip_subtitle_instructions else 0
+                    actual_difference = len(original_entries) - len(aligned_entries)
+                    if actual_difference != expected_skipped:
+                        print(f"⚠️  Unexpected entry count difference: expected {expected_skipped}, got {actual_difference}")
+                        return False
+
+            # Compare content by position (aligned entries are renumbered sequentially)
+            content_matches = []
+            for i, aligned_entry in enumerate(aligned_entries):
+                # Find corresponding original entry by position
+                # Account for potentially skipped entries at the beginning
+                original_index = i
+                if self.config.skip_subtitle_instructions and len(original_entries) > len(aligned_entries):
+                    original_index = i + (len(original_entries) - len(aligned_entries))
+
+                if original_index < len(original_entries):
+                    original_entry = original_entries[original_index]
+                    if original_entry.text.strip() == aligned_entry.text.strip():
+                        content_matches.append(True)
+                    else:
+                        content_matches.append(False)
+                        print(f"⚠️  Content mismatch at position {i}:")
+                        print(f"     Original: \"{original_entry.text[:50]}...\"")
+                        print(f"     Aligned:  \"{aligned_entry.text[:50]}...\"")
+
+            # Check for any missing content
+            missing_content_count = content_matches.count(False)
+            if missing_content_count > 0:
+                self.pipeline_stats['content_mismatches'] = missing_content_count
+                return False
+
+            print("✅ Subtitle integrity verification passed")
+            print("   All original entries preserved with matching content")
+            return True
+
+        except Exception as e:
+            print(f"Subtitle verification failed: {e}")
+            if self.config.verbose_logging:
+                import traceback
+                traceback.print_exc()
             return False
 
     def _finalize_pipeline(self, working_dir: Path) -> None:
@@ -625,13 +702,18 @@ Examples:
                                help='Subtitle codec for embedding (default: mov_text)')
     subtitle_group.add_argument('--subtitle-language', default=None,
                                help='Subtitle language code (default: eng)')
-    subtitle_group.add_argument('--no-align', action='store_true',
-                               help='Disable automatic subtitle alignment with Whisper')
     subtitle_group.add_argument('--whisper-model', default='large-v3',
                                choices=['tiny', 'base', 'small', 'medium', 'large', 'large-v2', 'large-v3'],
                                help='Whisper model size for subtitle alignment (default: large-v3)')
     subtitle_group.add_argument('--alignment-padding', type=float, default=0.05,
                                help='Time padding for aligned subtitles in seconds (default: 0.05)')
+    subtitle_group.add_argument('--sequential-align', action='store_true',
+                               help='Use sequential processing instead of parallel (slower but higher quality)')
+    subtitle_group.add_argument('--parallel-model', default='tiny.en',
+                               choices=['tiny.en', 'base', 'small', 'medium'],
+                               help='Whisper model for parallel alignment (default: tiny.en)')
+    subtitle_group.add_argument('--parallel-workers', type=int, default=2,
+                               help='Number of parallel workers for alignment (default: 2)')
 
     # Control options
     parser.add_argument('--cleanup', action='store_true',
@@ -698,10 +780,17 @@ def main():
         if args.subtitle_language is not None:
             config.subtitle_language = args.subtitle_language
 
-        # Subtitle alignment settings
-        config.align_subtitles = not args.no_align
-        config.whisper_model_size = args.whisper_model
+        # Subtitle alignment settings - always enabled, parallel by default
+        config.use_parallel_alignment = not args.sequential_align  # Default to parallel
+        config.parallel_whisper_model = args.parallel_model
+        config.parallel_workers = args.parallel_workers
         config.alignment_padding = args.alignment_padding
+
+        # Set model based on alignment method
+        if config.use_parallel_alignment:
+            config.whisper_model_size = args.parallel_model  # Use parallel model
+        else:
+            config.whisper_model_size = args.whisper_model  # Use sequential model
 
         # Validate required arguments
         if not args.srt and not args.extract_subtitles:

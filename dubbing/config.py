@@ -89,11 +89,14 @@ MAX_CONCURRENT_TTS_JOBS = 1       # Keep at 1 for stable Kokoro processing
 AUDIO_CHUNK_SIZE = 1024           # Buffer size for audio processing
 
 # Subtitle Alignment Settings
-ALIGN_SUBTITLES = True            # Enable subtitle alignment with Whisper
-WHISPER_MODEL_SIZE = 'large-v3'   # Whisper model size for alignment
+ALIGN_SUBTITLES = True            # Always enable subtitle alignment (choose method via USE_PARALLEL_ALIGNMENT)
+WHISPER_MODEL_SIZE = 'tiny.en'    # Whisper model size for alignment (tiny.en is fastest for English)
 WHISPER_DEVICE = 'cuda'           # Use GPU acceleration
 WHISPER_COMPUTE_TYPE = 'float16'  # Use float16 for GPU efficiency
 ALIGNMENT_PADDING = 0.05          # Time padding for subtitle display (50ms)
+ALIGNMENT_TIME_WINDOW = 30.0      # Time window in seconds for subtitle text matching (±15s)
+
+FORCE_REPROCESS = False           # Force reprocessing of already aligned files
 
 
 class Config:
@@ -146,6 +149,9 @@ class Config:
         self.whisper_device = WHISPER_DEVICE
         self.whisper_compute_type = WHISPER_COMPUTE_TYPE
         self.alignment_padding = ALIGNMENT_PADDING
+        self.alignment_time_window = ALIGNMENT_TIME_WINDOW
+
+        self.force_reprocess = FORCE_REPROCESS
 
     def validate(self) -> list:
         """Validate configuration settings and return any issues."""
@@ -192,6 +198,10 @@ class Config:
         if self.gpu_cq < 0 or self.gpu_cq > 51:
             issues.append("gpu_cq must be between 0-51")
 
+        # Validate alignment settings
+        if self.alignment_time_window <= 0:
+            issues.append("alignment_time_window must be positive")
+
         return issues
 
     def create_working_dir(self, video_name: str) -> Path:
@@ -211,6 +221,10 @@ class Config:
     def get_audio_snippet_path(self, working_dir: Path, sentence_id: int) -> Path:
         """Get path for an individual audio snippet."""
         return working_dir / 'audio_snippets' / f'sentence_{sentence_id:03d}.wav'
+
+    def get_audio_snippets_dir(self, working_dir: Path) -> Path:
+        """Get path for the audio snippets directory."""
+        return working_dir / 'audio_snippets'
 
     def get_final_audio_path(self, working_dir: Path) -> Path:
         """Get path for the final combined audio file."""
@@ -247,7 +261,9 @@ class Config:
             'compression_preset': self.compression_preset,
             'align_subtitles': self.align_subtitles,
             'whisper_model_size': self.whisper_model_size,
-            'alignment_padding': self.alignment_padding
+            'alignment_padding': self.alignment_padding,
+            'alignment_time_window': self.alignment_time_window,
+            'force_reprocess': self.force_reprocess
         }
 
     def from_dict(self, config_dict: dict) -> None:
@@ -298,6 +314,7 @@ class Config:
             f"Audio Bitrate: {self.audio_compression_bitrate}",
             f"Embed Subtitles: {self.embed_subtitles}",
             f"Subtitle Codec: {self.subtitle_codec}",
+            f"Subtitle Alignment: {self.align_subtitles}",
         ]
         return "Configuration:\n  " + "\n  ".join(config_lines)
 

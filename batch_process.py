@@ -12,7 +12,7 @@ import time
 
 # Configuration
 SOURCE_DIR = Path("/mnt/d/Coloso/Syagamu")
-OUTPUT_DIR = Path("./output")
+BASE_OUTPUT_DIR = Path("./output")
 CONDA_ACTIVATION = "/bin/bash -c 'source /home/ross/miniconda/etc/profile.d/conda.sh && conda activate kokoro'"
 
 def find_video_subtitle_pairs(source_dir):
@@ -70,31 +70,35 @@ def find_video_subtitle_pairs(source_dir):
 
     return pairs
 
-def check_output_exists(video_path, output_dir):
+def check_output_exists(video_path, base_output_dir):
     """Check if the output file already exists for a given video."""
     output_filename = video_path.name
-    output_path = output_dir / output_filename
+    source_dir_name = video_path.parent.name
+    output_path = base_output_dir / source_dir_name / output_filename
     return output_path.exists()
 
-def process_video(video_path, srt_path, verbose=True):
+def process_video(video_path, srt_path, verbose=False):
     """Process a single video-subtitle pair."""
-    # Build the command
-    python_cmd = f'python -m dubbing.main --video "{video_path}" --srt "{srt_path}"'
-    if verbose:
-        python_cmd += " --verbose"
-
-    cmd = f'/bin/bash -c "source /home/ross/miniconda/etc/profile.d/conda.sh && conda activate kokoro && {python_cmd}"'
+    # Build the command args
+    args = [
+        '/bin/bash', '-c',
+        'source /home/ross/miniconda/etc/profile.d/conda.sh && conda activate kokoro && python -m dubbing.main --video "$1" --srt "$2"' + (' --verbose' if verbose else ''),
+        'bash',  # $0
+        str(video_path),  # $1
+        str(srt_path)     # $2
+    ]
 
     print(f"\n{'='*60}")
     print(f"Processing: {video_path.name}")
     print(f"Subtitles: {srt_path.name}")
-    print(f"Command: {cmd}")
+    print(f"Video Path: {video_path}")
+    print(f"SRT Path: {srt_path}")
     print(f"{'='*60}\n")
 
     # Execute the command
     start_time = time.time()
     try:
-        result = subprocess.run(cmd, shell=True, capture_output=False, text=True)
+        result = subprocess.run(args, capture_output=False, text=True)
         elapsed_time = time.time() - start_time
 
         if result.returncode == 0:
@@ -116,11 +120,11 @@ def main():
     print("BATCH VIDEO DUBBING PROCESSOR")
     print("=" * 70)
     print(f"Source Directory: {SOURCE_DIR}")
-    print(f"Output Directory: {OUTPUT_DIR}")
+    print(f"Output Directory: {BASE_OUTPUT_DIR}")
     print()
 
     # Ensure output directory exists
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    BASE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Find all video-subtitle pairs
     print("Scanning for video-subtitle pairs...")
@@ -138,7 +142,7 @@ def main():
     skipped = []
 
     for video_path, srt_path in pairs:
-        if check_output_exists(video_path, OUTPUT_DIR):
+        if check_output_exists(video_path, BASE_OUTPUT_DIR):
             skipped.append(video_path.name)
             print(f"⏭️  Skipping (already exists): {video_path.name}")
         else:
