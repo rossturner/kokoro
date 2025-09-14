@@ -32,6 +32,14 @@ AUDIO_BITRATE = '192k'
 VIDEO_CODEC = 'libx264'
 AUDIO_CODEC = 'aac'
 
+# GPU Acceleration Settings
+ENABLE_GPU_ACCELERATION = True       # Use GPU encoding when available
+GPU_CODEC = 'h264_nvenc'            # NVIDIA NVENC encoder (h264_nvenc, hevc_nvenc)
+GPU_PRESET = 'p4'                   # NVENC preset: p1-p7 (p1=fastest, p7=slowest/best quality)
+GPU_PROFILE = 'high'                # NVENC profile: baseline, main, high
+GPU_RC_MODE = 'vbr'                 # Rate control: cbr, vbr, constqp, lossless
+GPU_CQ = 23                         # Constant quality (0-51, lower=better)
+
 # Video Compression Settings (Default: Enabled for Handbrake-equivalent output)
 ENABLE_VIDEO_COMPRESSION = True
 VIDEO_CRF = 23                      # Constant Rate Factor (0-51, lower=better quality)
@@ -51,6 +59,13 @@ COMPRESSION_PRESETS = {
     'archive': {'crf': 18, 'preset': 'slow', 'audio_br': '192k'},      # High quality
     'balanced': {'crf': 23, 'preset': 'medium', 'audio_br': '128k'},   # Default (Handbrake-like)
     'compact': {'crf': 28, 'preset': 'fast', 'audio_br': '96k'},       # Smaller files
+}
+
+# GPU Quality Presets (NVENC)
+GPU_COMPRESSION_PRESETS = {
+    'gpu_archive': {'cq': 18, 'preset': 'p6', 'audio_br': '192k'},     # High quality GPU
+    'gpu_balanced': {'cq': 23, 'preset': 'p4', 'audio_br': '128k'},    # Default GPU (fast)
+    'gpu_fast': {'cq': 26, 'preset': 'p2', 'audio_br': '128k'},        # Very fast GPU
 }
 
 # Processing Modes
@@ -98,6 +113,14 @@ class Config:
         self.output_dir = Path(DEFAULT_OUTPUT_DIR)
         self.cleanup_intermediate_files = CLEANUP_INTERMEDIATE_FILES
         self.verbose_logging = VERBOSE_LOGGING
+
+        # GPU acceleration settings
+        self.enable_gpu_acceleration = ENABLE_GPU_ACCELERATION
+        self.gpu_codec = GPU_CODEC
+        self.gpu_preset = GPU_PRESET
+        self.gpu_profile = GPU_PROFILE
+        self.gpu_rc_mode = GPU_RC_MODE
+        self.gpu_cq = GPU_CQ
 
         # New compression settings
         self.enable_video_compression = ENABLE_VIDEO_COMPRESSION
@@ -148,6 +171,22 @@ class Config:
 
         if self.subtitle_codec not in ['mov_text', 'srt', 'ass', 'webvtt', 'ttml']:
             issues.append(f"Invalid subtitle_codec '{self.subtitle_codec}'")
+
+        # Validate GPU settings
+        if self.gpu_codec not in ['h264_nvenc', 'hevc_nvenc']:
+            issues.append(f"Invalid gpu_codec '{self.gpu_codec}'")
+
+        if self.gpu_preset not in ['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7']:
+            issues.append(f"Invalid gpu_preset '{self.gpu_preset}'")
+
+        if self.gpu_profile not in ['baseline', 'main', 'high']:
+            issues.append(f"Invalid gpu_profile '{self.gpu_profile}'")
+
+        if self.gpu_rc_mode not in ['cbr', 'vbr', 'constqp', 'lossless']:
+            issues.append(f"Invalid gpu_rc_mode '{self.gpu_rc_mode}'")
+
+        if self.gpu_cq < 0 or self.gpu_cq > 51:
+            issues.append("gpu_cq must be between 0-51")
 
         return issues
 
@@ -224,6 +263,15 @@ class Config:
             self.audio_compression_bitrate = preset['audio_br']
             self.compression_preset = preset_name
 
+    def apply_gpu_preset(self, preset_name: str) -> None:
+        """Apply a GPU compression preset."""
+        if preset_name in GPU_COMPRESSION_PRESETS:
+            preset = GPU_COMPRESSION_PRESETS[preset_name]
+            self.gpu_cq = preset['cq']
+            self.gpu_preset = preset['preset']
+            self.audio_compression_bitrate = preset['audio_br']
+            self.compression_preset = preset_name
+
     def __str__(self) -> str:
         """String representation of configuration."""
         config_lines = [
@@ -234,6 +282,10 @@ class Config:
             f"Working Directory: {self.working_dir}",
             f"Cleanup Files: {self.cleanup_intermediate_files}",
             f"Video Compression: {self.enable_video_compression}",
+            f"GPU Acceleration: {self.enable_gpu_acceleration}",
+            f"GPU Codec: {self.gpu_codec}",
+            f"GPU Quality (CQ): {self.gpu_cq}",
+            f"GPU Preset: {self.gpu_preset}",
             f"Video Quality (CRF): {self.video_crf}",
             f"Video Preset: {self.video_preset}",
             f"Audio Bitrate: {self.audio_compression_bitrate}",

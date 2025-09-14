@@ -173,15 +173,34 @@ class DubbingPipeline:
             if not video_info.has_audio:
                 print("Warning: Input video has no audio track")
 
-            # Copy files to working directory
-            video_copy, srt_copy = self.video_processor.copy_files_to_working_dir(
+            # Copy files to working directory (or skip if identical)
+            video_copy, srt_copy, copy_status = self.video_processor.copy_files_to_working_dir(
                 video_path, srt_path, working_dir
             )
 
             # Store the copied video path for later use
             self.working_video_path = video_copy
 
-            print(f"Files copied successfully")
+            # Report file setup results
+            copied_files = []
+            skipped_files = []
+
+            if copy_status['video_copied']:
+                copied_files.append('video')
+            else:
+                skipped_files.append('video')
+
+            if copy_status['srt_copied']:
+                copied_files.append('SRT')
+            else:
+                skipped_files.append('SRT')
+
+            if copied_files:
+                print(f"Files copied: {', '.join(copied_files)}")
+            if skipped_files:
+                print(f"Files skipped (already identical): {', '.join(skipped_files)}")
+
+            print("File setup completed")
             self.pipeline_stats['steps_completed'].append('file_setup')
             return True
 

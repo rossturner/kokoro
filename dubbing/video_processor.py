@@ -6,6 +6,7 @@ Handles video file operations including audio extraction, replacement, and final
 import os
 import shutil
 import subprocess
+import hashlib
 from pathlib import Path
 from typing import Optional, Tuple, Dict
 from dataclasses import dataclass
@@ -41,6 +42,7 @@ class VideoProcessor:
     def __init__(self, config: Config):
         self.config = config
         self._check_ffmpeg_available()
+        self._gpu_available = self._check_gpu_available()
 
     def _check_ffmpeg_available(self) -> None:
         """Check if FFmpeg is available in the system."""
@@ -53,6 +55,70 @@ class VideoProcessor:
             raise RuntimeError("FFmpeg not found. Please install FFmpeg to use video processing features.")
         except subprocess.TimeoutExpired:
             raise RuntimeError("FFmpeg check timed out")
+
+    def _check_gpu_available(self) -> bool:
+        """Check if GPU encoding (NVENC) is available."""
+        try:
+            # Check if the configured GPU codec is available
+            result = subprocess.run([
+                'ffmpeg', '-hide_banner', '-encoders'
+            ], capture_output=True, text=True, timeout=10)
+
+            if result.returncode != 0:
+                return False
+
+            # Look for NVENC encoder in the output
+            gpu_codec = self.config.gpu_codec
+            if gpu_codec in result.stdout:
+                if self.config.verbose_logging:
+                    print(f"GPU encoder '{gpu_codec}' detected and available")
+                return True
+            else:
+                if self.config.verbose_logging:
+                    print(f"GPU encoder '{gpu_codec}' not available, falling back to CPU")
+                return False
+
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            if self.config.verbose_logging:
+                print("Unable to detect GPU availability, using CPU encoding")
+            return False
+
+    @property
+    def is_gpu_encoding_enabled(self) -> bool:
+        """Check if GPU encoding is currently enabled and available."""
+        return (self.config.enable_gpu_acceleration and
+                self._gpu_available and
+                self.config.enable_video_compression)
+
+    def _get_file_hash(self, file_path: Path, chunk_size: int = 8192) -> str:
+        """Calculate MD5 hash of a file efficiently."""
+        hash_md5 = hashlib.md5()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(chunk_size), b""):
+                hash_md5.update(chunk)
+        return hash_md5.hexdigest()
+
+    def _files_are_identical(self, file1: Path, file2: Path) -> bool:
+        """Check if two files are identical by comparing size and hash."""
+        if not file1.exists() or not file2.exists():
+            return False
+
+        # Quick size check first
+        if file1.stat().st_size != file2.stat().st_size:
+            return False
+
+        # For small files, compare hashes directly
+        if file1.stat().st_size < 1024 * 1024:  # 1MB
+            return self._get_file_hash(file1) == self._get_file_hash(file2)
+
+        # For large files, compare modification time and size (heuristic)
+        # This is much faster than hashing large video files
+        stat1 = file1.stat()
+        stat2 = file2.stat()
+
+        # Same size and modification time suggests same file
+        return (stat1.st_size == stat2.st_size and
+                abs(stat1.st_mtime - stat2.st_mtime) < 1.0)
 
     def get_video_info(self, video_path: Path) -> VideoInfo:
         """
@@ -139,9 +205,9 @@ class VideoProcessor:
         video_path: str,
         srt_path: str,
         working_dir: Path
-    ) -> Tuple[Path, Path]:
+    ) -> Tuple[Path, Path, Dict[str, bool]]:
         """
-        Copy video and SRT files to working directory.
+        Copy video and SRT files to working directory, skipping if identical files exist.
 
         Args:
             video_path: Path to original video file
@@ -149,7 +215,8 @@ class VideoProcessor:
             working_dir: Working directory path
 
         Returns:
-            Tuple of (copied_video_path, copied_srt_path)
+            Tuple of (copied_video_path, copied_srt_path, copy_status_dict)
+            copy_status_dict contains 'video_copied' and 'srt_copied' booleans
         """
         try:
             video_src = Path(video_path)
@@ -163,17 +230,32 @@ class VideoProcessor:
             # Create working directory if it doesn't exist
             working_dir.mkdir(parents=True, exist_ok=True)
 
-            # Copy files (preserve original video filename)
+            # Define destination paths
             video_dst = working_dir / video_src.name
             srt_dst = working_dir / "subtitles.srt"
 
-            print(f"Copying video file: {video_src} -> {video_dst}")
-            shutil.copy2(video_src, video_dst)
+            copy_status = {
+                'video_copied': False,
+                'srt_copied': False
+            }
 
-            print(f"Copying SRT file: {srt_src} -> {srt_dst}")
-            shutil.copy2(srt_src, srt_dst)
+            # Check and copy video file
+            if self._files_are_identical(video_src, video_dst):
+                print(f"Video file already exists and is identical, skipping copy: {video_dst}")
+            else:
+                print(f"Copying video file: {video_src} -> {video_dst}")
+                shutil.copy2(video_src, video_dst)
+                copy_status['video_copied'] = True
 
-            return video_dst, srt_dst
+            # Check and copy SRT file (always use hash for small text files)
+            if srt_dst.exists() and self._get_file_hash(srt_src) == self._get_file_hash(srt_dst):
+                print(f"SRT file already exists and is identical, skipping copy: {srt_dst}")
+            else:
+                print(f"Copying SRT file: {srt_src} -> {srt_dst}")
+                shutil.copy2(srt_src, srt_dst)
+                copy_status['srt_copied'] = True
+
+            return video_dst, srt_dst, copy_status
 
         except Exception as e:
             raise RuntimeError(f"Failed to copy files to working directory: {e}")
@@ -478,12 +560,37 @@ class VideoProcessor:
             '-i', str(video_input),        # Video input
             '-i', str(audio_input),        # Audio input (Kokoro TTS)
             '-i', str(subtitle_input),     # Subtitle input (SRT file)
+        ]
 
-            # Video compression settings
-            '-c:v', 'libx264',
-            '-crf', str(self.config.video_crf),
-            '-preset', self.config.video_preset,
+        # Determine if we should use GPU or CPU encoding
+        use_gpu = (self.config.enable_gpu_acceleration and
+                  self._gpu_available and
+                  self.config.enable_video_compression)
 
+        if use_gpu:
+            # GPU encoding settings (NVENC)
+            cmd.extend([
+                '-c:v', self.config.gpu_codec,
+                '-preset', self.config.gpu_preset,
+                '-profile:v', self.config.gpu_profile,
+                '-rc', self.config.gpu_rc_mode,
+                '-cq', str(self.config.gpu_cq)
+            ])
+
+            if self.config.verbose_logging:
+                print(f"Using GPU encoding: {self.config.gpu_codec} with preset {self.config.gpu_preset}")
+        else:
+            # CPU encoding settings (traditional)
+            cmd.extend([
+                '-c:v', 'libx264',
+                '-crf', str(self.config.video_crf),
+                '-preset', self.config.video_preset
+            ])
+
+            if self.config.verbose_logging:
+                print(f"Using CPU encoding: libx264 with preset {self.config.video_preset}")
+
+        cmd.extend([
             # Audio compression settings
             '-c:a', self.config.audio_codec,  # AAC
             '-b:a', self.config.audio_compression_bitrate,
@@ -506,11 +613,16 @@ class VideoProcessor:
 
             '-y',  # Overwrite output
             str(output)
-        ]
+        ])
 
-        # Add max bitrate if specified
-        if hasattr(self.config, 'video_max_bitrate') and self.config.video_max_bitrate:
-            cmd.extend(['-maxrate', self.config.video_max_bitrate, '-bufsize', '1000k'])
+        # Add max bitrate only for CPU encoding (GPU handles this differently)
+        if not use_gpu and hasattr(self.config, 'video_max_bitrate') and self.config.video_max_bitrate:
+            # Insert max bitrate before the output filename
+            output_index = cmd.index(str(output))
+            cmd.insert(output_index, '-bufsize')
+            cmd.insert(output_index + 1, '1000k')
+            cmd.insert(output_index, '-maxrate')
+            cmd.insert(output_index + 1, self.config.video_max_bitrate)
 
         return cmd
 
@@ -698,7 +810,7 @@ def main():
 
         # Test file copying
         working_dir = Path("./working/test_video_processor")
-        video_copy, srt_copy = processor.copy_files_to_working_dir(
+        video_copy, srt_copy, copy_status = processor.copy_files_to_working_dir(
             video_path,
             "/mnt/d/Coloso/Syagamu/01.srt",
             working_dir
