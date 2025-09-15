@@ -485,10 +485,13 @@ if __name__ == "__main__":
         # Convert to lowercase
         text = text.lower()
 
+        # Replace line breaks with spaces
+        text = text.replace('\n', ' ').replace('\r', ' ')
+
         # Remove common punctuation but keep apostrophes
         text = re.sub(r'[^\w\s\']', ' ', text)
 
-        # Normalize whitespace
+        # Normalize whitespace (this will also clean up multiple spaces from line breaks)
         text = re.sub(r'\s+', ' ', text).strip()
 
         return text

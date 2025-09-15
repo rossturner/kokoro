@@ -815,10 +815,9 @@ def main():
                 print(f"  Track {track['index']}: {track['codec']}, "
                       f"language={track['language']}{default_marker}")
 
-            # Extract to temporary file in working directory
+            # Extract to working directory using standardized naming
             video_name = Path(args.video).stem
-            temp_working_dir = config.working_dir / video_name
-            temp_working_dir.mkdir(parents=True, exist_ok=True)
+            temp_working_dir = config.create_working_dir(video_name)
             extracted_srt_path = temp_working_dir / "extracted_subtitles.srt"
 
             success = extractor.extract_subtitles(
