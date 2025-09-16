@@ -4,6 +4,7 @@ Realigns subtitle timings to match actual spoken words using faster-whisper tran
 """
 
 import json
+import math
 import re
 import logging
 from pathlib import Path
@@ -424,10 +425,15 @@ if __name__ == "__main__":
                     candidate_start = candidate_words[i].start
                     time_distance = abs(candidate_start - original_start)
 
-                    # Temporal proximity score: closer matches get higher scores
-                    # Score decreases linearly with distance, max bonus of 0.3
-                    temporal_bonus = max(0, 0.3 * (1 - time_distance / window_size))
-                    combined_score = text_similarity + temporal_bonus
+                    # Exponential decay temporal scoring for stronger time preference
+                    if text_similarity >= 0.99:  # Near-perfect text match
+                        # For perfect matches, heavily weight temporal proximity
+                        temporal_score = math.exp(-time_distance / 3.0)  # Stronger decay
+                        combined_score = text_similarity * 0.3 + temporal_score * 0.7
+                    else:
+                        # Normal scoring for partial matches
+                        temporal_score = math.exp(-time_distance / 5.0)  # Decays to ~0.37 at 5s
+                        combined_score = text_similarity * 0.7 + temporal_score * 0.3
 
                     if combined_score > best_score:
                         best_score = combined_score

@@ -11,10 +11,10 @@ from pathlib import Path
 import time
 
 # Configuration
-SOURCE_DIR = Path("/mnt/d/Coloso/Mogoon - Fundamentals of Stylized Character Art")
+SOURCE_DIR = Path("/mnt/d/Coloso/Chyan - Class+ Designing Eye-Catching Anime Characters")
 BASE_OUTPUT_DIR = Path("./output")
 CONDA_ACTIVATION = "/bin/bash -c 'source /home/ross/miniconda/etc/profile.d/conda.sh && conda activate kokoro'"
-VOICE = "am_echo"  # Male American voice
+VOICE = "am_fenrir"  # Male American voice
 
 def find_videos_with_embedded_subtitles(source_dir):
     """Find all video files with embedded subtitles in the source directory and subdirectories."""
@@ -36,8 +36,17 @@ def check_output_exists(video_path, base_output_dir, source_dir):
     """Check if the output file already exists for a given video."""
     # Get relative path from source directory to maintain subdirectory structure
     relative_path = video_path.relative_to(source_dir)
-    output_path = base_output_dir / "Mogoon - Fundamentals of Stylized Character Art" / relative_path
-    return output_path.exists()
+
+    # Check multiple possible output locations:
+    # 1. Direct path (current structure): output/subdirectory/video.mp4
+    # 2. With course name: output/Chyan.../subdirectory/video.mp4
+    possible_paths = [
+        base_output_dir / relative_path,  # Direct structure
+        base_output_dir / "Chyan - Class+ Designing Eye-Catching Anime Characters" / relative_path  # Course name structure
+    ]
+
+    # Return True if any of the possible paths exist
+    return any(path.exists() for path in possible_paths)
 
 def process_video(video_path, verbose=False):
     """Process a single video with embedded subtitles."""
