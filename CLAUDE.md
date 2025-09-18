@@ -15,7 +15,7 @@ Kokoro is a neural text-to-speech system that generates natural-sounding speech 
 
 ### Key Features
 
-- **82 Voice Options**: Comprehensive voice library across multiple languages and styles (American, British, European, Asian)
+- **54 Voice Options**: Comprehensive voice library across multiple languages and styles (American, British, European, Asian)
 - **High Quality**: 24kHz sample rate audio output
 - **Real-time Generation**: Efficient streaming generation
 - **Phoneme Support**: Advanced phonetic processing for natural speech
@@ -121,7 +121,7 @@ Input: Video File (with or without SRT)
 ├── Subtitle Extractor: Extract embedded subtitles from video
 ├── SRT Parser: Extract and validate subtitles from SRT or extracted tracks
 ├── Sentence Grouper: Combine entries into complete sentences
-├── TTS Generator: Create audio using Kokoro with 82 voice options
+├── TTS Generator: Create audio using Kokoro with 54 voice options
 ├── Audio Assembler: Build timeline with intelligent timing and normalization
 ├── Subtitle Aligner: AI-powered subtitle timing correction using Whisper
 └── Video Processor: GPU-accelerated encoding with compression presets
@@ -189,7 +189,7 @@ python batch_process.py
 
 #### Configuration Options
 ```bash
-# Voice Selection (82 options available)
+# Voice Selection (54 options available)
 --voice af_heart     # Default American female voice
 --voice am_adam      # American male voice
 --voice bf_alice     # British female voice
